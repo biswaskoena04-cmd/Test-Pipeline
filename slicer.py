@@ -3,7 +3,7 @@ from tree_sitter import Language, Parser
 import tree_sitter_c as tsc
 from scanner import scan
 
-SEPARATOR = "-" * 60
+SEPARATOR = "-" * 60 
 
 def extract_functions(code):
     """Use Tree-Sitter to extract all function definitions from C code."""
