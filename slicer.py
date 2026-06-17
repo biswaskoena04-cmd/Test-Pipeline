@@ -1,0 +1,104 @@
+import time
+from tree_sitter import Language, Parser
+import tree_sitter_c as tsc
+from scanner import scan
+
+SEPARATOR = "-" * 60
+
+def extract_functions(code):
+    """Use Tree-Sitter to extract all function definitions from C code."""
+    C_LANGUAGE = Language(tsc.language())
+    parser = Parser(C_LANGUAGE)
+
+    code_bytes = code.encode("utf-8")
+    tree = parser.parse(code_bytes)
+    root = tree.root_node
+
+    functions = []
+
+    def walk(node):
+        if node.type == "function_definition":
+            func_code = code_bytes[node.start_byte:node.end_byte].decode("utf-8")
+            functions.append({
+                "name": get_function_name(node, code_bytes),
+                "code": func_code,
+                "start_line": node.start_point[0] + 1,
+                "end_line": node.end_point[0] + 1
+            })
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    return functions
+
+
+def get_function_name(node, code_bytes):
+    """Extract function name from a function_definition node."""
+    for child in node.children:
+        if child.type == "function_declarator":
+            for subchild in child.children:
+                if subchild.type == "identifier":
+                    return code_bytes[subchild.start_byte:subchild.end_byte].decode("utf-8")
+    return "unknown"
+
+
+def slice_findings(findings):
+    print(f"[SLICER] Processing {len(findings)} findings with Tree-Sitter...\n")
+    start = time.time()
+
+    sliced = []
+
+    for finding in findings:
+        vuln_code = finding["vulnerable_code"]
+        patch_code = finding["patch"]
+
+        vuln_functions = extract_functions(vuln_code)
+        patch_functions = extract_functions(patch_code)
+
+        print(SEPARATOR)
+        print(f"ID    : {finding['id']}")
+        print(f"CWE   : {finding['cwe_id']}")
+        print(f"CVE   : {finding['cve_id']}")
+
+        if finding["semgrep_findings"]:
+            print(f"SEMGREP RULES HIT:")
+            for sf in finding["semgrep_findings"]:
+                print(f"  - {sf['rule']} (line {sf['line']}): {sf['message']}")
+
+        if vuln_functions:
+            print(f"\nVULN FUNCTIONS EXTRACTED BY TREE-SITTER ({len(vuln_functions)} found):")
+            for fn in vuln_functions:
+                print(f"\n  Function: {fn['name']} (lines {fn['start_line']}-{fn['end_line']})")
+                print(f"  Code:\n{fn['code']}")
+        else:
+            print(f"\nVULN (raw — Tree-Sitter found no complete function definitions):")
+            print(vuln_code)
+
+        if patch_functions:
+            print(f"\nPATCH FUNCTIONS EXTRACTED BY TREE-SITTER ({len(patch_functions)} found):")
+            for fn in patch_functions:
+                print(f"\n  Function: {fn['name']} (lines {fn['start_line']}-{fn['end_line']})")
+                print(f"  Code:\n{fn['code']}")
+        else:
+            print(f"\nPATCH (raw — Tree-Sitter found no complete function definitions):")
+            print(patch_code)
+
+        print(SEPARATOR + "\n")
+
+        sliced.append({
+            "id": finding["id"],
+            "CWE": finding["cwe_id"],
+            "CVE": finding["cve_id"],
+            "VULN": vuln_functions if vuln_functions else vuln_code,
+            "PATCH": patch_functions if patch_functions else patch_code,
+            "semgrep_findings": finding["semgrep_findings"]
+        })
+
+    elapsed = time.time() - start
+    print(f"[SLICER] Done. Sliced {len(sliced)} entries in {elapsed:.3f} seconds.\n")
+    return sliced
+
+
+if __name__ == "__main__":
+    findings = scan("test_input.json")
+    slice_findings(findings)
