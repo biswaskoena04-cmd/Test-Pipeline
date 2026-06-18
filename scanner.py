@@ -6,15 +6,15 @@ import time
 
 
 def run_semgrep(src_dir: str):
-    """Runs Semgrep using explicit open community query packs."""
+    """Runs Semgrep against the folder using the comprehensive C security pack."""
     findings_by_file = {}
 
-    # Explicitly pull down the open-source C and security rule-packs
+    # Force download and usage of explicit C vulnerability rules
     result = subprocess.run(
         [
             "semgrep",
             "--config", "p/c",
-            "--config", "p/owasp-top-10",
+            "--config", "p/security-audit",
             "--json",
             "--quiet",
             src_dir
@@ -38,10 +38,12 @@ def run_semgrep(src_dir: str):
                 if filename not in findings_by_file:
                     findings_by_file[filename] = []
                 
+                # Subtract 1 from the line number if you want to normalize 
+                # the line numbers back to the original unwrapped code
                 findings_by_file[filename].append({
                     "rule": rule_id,
                     "message": message,
-                    "line": line
+                    "line": max(1, line - 1)  
                 })
 
         except json.JSONDecodeError:
@@ -66,23 +68,28 @@ def scan(json_path: str):
     with tempfile.TemporaryDirectory() as tmpdir:
         valid_entries = {}
 
-        # Isolate code fragments into temporary files
         for idx, entry in enumerate(data):
             vuln_code = entry.get("vulnerable_code", "").strip()
 
             if not vuln_code:
-                print(f"[SKIP] Entry {idx} - missing vulnerable_code")
                 continue
+
+            # CRITICAL FIX: If the block doesn't start with a function definition,
+            # wrap it in a dummy function so the static analyzer can parse its structures.
+            if "{" in vuln_code and not vuln_code.startswith("void") and not vuln_code.startswith("int"):
+                wrapped_code = f"void dataset_harness_{idx}() {{\n{vuln_code}\n}}"
+            else:
+                wrapped_code = vuln_code
 
             filename = f"entry_{idx}.c"
             code_path = os.path.join(tmpdir, filename)
 
             with open(code_path, "w", encoding="utf-8") as f:
-                f.write(vuln_code)
+                f.write(wrapped_code)
             
             valid_entries[filename] = (idx, entry)
 
-        print("[SCANNER] Running single batch optimization pass using Semgrep rules...")
+        print("[SCANNER] Running single batch pass across normalized snippets...")
         all_findings = run_semgrep(tmpdir)
 
         # Build downstream structures for the LLM pipeline
