@@ -1,12 +1,14 @@
 import time
 from tree_sitter import Language, Parser
 import tree_sitter_c as tsc
-from scanner import scan  # Ingests from the zero-network scanner
+from scanner import scan  # Targets your updated scanner logic
 
 SEPARATOR = "-" * 60 
 
 def extract_functions(code):
     """Isolates and extracts functional segments from blocks using Tree-Sitter."""
+    if not code:
+        return []
     C_LANGUAGE = Language(tsc.language())
     parser = Parser(C_LANGUAGE)
 
@@ -42,18 +44,19 @@ def get_function_name(node, code_bytes):
 
 
 def slice_findings(findings):
-    print(f"[SLICER] Refining entries via Tree-Sitter slicing...\n")
+    print(f"\n[SLICER] Refining entries via Tree-Sitter slicing...")
     start = time.time()
 
     sliced_llm_payload = []
 
     for finding in findings:
-        # CRITICAL FILTER STEP: Skip any entries that do not have findings
+        # 1. CRITICAL FILTER STEP: Skip entries that do not have active findings
         if not finding.get("semgrep_findings"):
             continue
 
-        vuln_code = finding["vulnerable_code"]
-        patch_code = finding["fixed_code"] 
+        # 2. Key normalization fallback wrapper matching your JSON dataset schema maps
+        vuln_code = finding.get("vulnerable_code", "").strip()
+        patch_code = finding.get("fixed_code", "").strip()
 
         vuln_functions = extract_functions(vuln_code)
         patch_functions = extract_functions(patch_code)
@@ -76,7 +79,6 @@ def slice_findings(findings):
 
         print(SEPARATOR + "\n")
 
-        # Package data cleanly to keep LLM token limits optimized
         sliced_llm_payload.append({
             "id": finding["id"],
             "CWE": finding["cwe_id"],
@@ -87,7 +89,8 @@ def slice_findings(findings):
         })
 
     elapsed = time.time() - start
-    print(f"[SLICER] Completed. Generated exactly {len(sliced_llm_payload)} optimized context sets for the LLM pipeline in {elapsed:.3f}s.\n")
+    print(f"[SLICER] Completed processing.")
+    print(f"SUCCESS: Generated exactly {len(sliced_llm_payload)} optimized context sets for the LLM pipeline in {elapsed:.3f}s.\n")
     return sliced_llm_payload
 
 
