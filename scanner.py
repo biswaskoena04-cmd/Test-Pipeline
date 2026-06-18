@@ -5,96 +5,191 @@ import tempfile
 import time
 import re
 
-def scan(json_path):
+# ── Language detection ────────────────────────────────────────────────────────
+
+LANG_EXTENSION = {
+    "c":          ".c",
+    "cpp":        ".cpp",
+    "python":     ".py",
+    "java":       ".java",
+    "javascript": ".js",
+    "typescript": ".ts",
+    "go":         ".go",
+    "ruby":       ".rb",
+    "php":        ".php",
+    "rust":       ".rs",
+}
+
+LANG_KEYWORDS = {
+    "python":     [r"\bdef\b", r"\bimport\b", r"\bprint\s*\("],
+    "java":       [r"\bpublic\s+class\b", r"\bSystem\.out\b", r"\bimport\s+java"],
+    "javascript": [r"\bconst\b", r"\blet\b", r"require\(", r"=>"],
+    "typescript": [r":\s*(string|number|boolean|void)\b", r"\binterface\b"],
+    "go":         [r"\bfunc\b", r"\bpackage\b", r":="],
+    "ruby":       [r"\bdef\b", r"\bend\b", r"\bputs\b"],
+    "php":        [r"<\?php", r"\$[a-zA-Z_]"],
+    "rust":       [r"\bfn\b", r"\blet\s+mut\b", r"\bimpl\b"],
+    "cpp":        [r"\bcout\b", r"\bstd::", r"#include\s*<", r"\bclass\b"],
+    "c":          [r"#include\s*<stdio", r"\bprintf\b", r"\bmalloc\b", r"\bfree\b"],
+}
+
+def detect_language(code: str, cwe_id: str = "") -> str:
+    scores = {lang: 0 for lang in LANG_KEYWORDS}
+    for lang, patterns in LANG_KEYWORDS.items():
+        for pat in patterns:
+            if re.search(pat, code):
+                scores[lang] += 1
+
+    best_lang = max(scores, key=scores.get)
+    if scores[best_lang] > 0:
+        return best_lang
+
+    # CWE hint fallback
+    c_cwes = {"CWE-119", "CWE-120", "CWE-121", "CWE-122",
+              "CWE-125", "CWE-416", "CWE-415", "CWE-476"}
+    if any(c in cwe_id for c in c_cwes):
+        return "c"
+
+    return "c"
+
+
+# ── Semgrep registry rule packs ───────────────────────────────────────────────
+# Maps CWE prefix → semgrep registry config strings (no patterns written by us)
+
+CWE_TO_REGISTRY = {
+    "CWE-22":  ["p/owasp-top-ten", "p/security-audit"],
+    "CWE-78":  ["p/owasp-top-ten", "p/command-injection"],
+    "CWE-79":  ["p/owasp-top-ten", "p/xss"],
+    "CWE-89":  ["p/owasp-top-ten", "p/sql-injection"],
+    "CWE-119": ["p/security-audit"],
+    "CWE-120": ["p/security-audit"],
+    "CWE-121": ["p/security-audit"],
+    "CWE-122": ["p/security-audit"],
+    "CWE-125": ["p/security-audit"],
+    "CWE-134": ["p/security-audit"],
+    "CWE-190": ["p/security-audit"],
+    "CWE-200": ["p/owasp-top-ten", "p/security-audit"],
+    "CWE-287": ["p/owasp-top-ten", "p/jwt"],
+    "CWE-306": ["p/owasp-top-ten"],
+    "CWE-327": ["p/owasp-top-ten", "p/secrets"],
+    "CWE-330": ["p/owasp-top-ten", "p/secrets"],
+    "CWE-352": ["p/owasp-top-ten"],
+    "CWE-400": ["p/security-audit"],
+    "CWE-415": ["p/security-audit"],
+    "CWE-416": ["p/security-audit"],
+    "CWE-476": ["p/security-audit"],
+    "CWE-502": ["p/owasp-top-ten", "p/security-audit"],
+    "CWE-601": ["p/owasp-top-ten"],
+    "CWE-611": ["p/owasp-top-ten"],
+    "CWE-798": ["p/secrets", "p/owasp-top-ten"],
+    "CWE-918": ["p/owasp-top-ten"],
+}
+
+DEFAULT_PACKS = ["p/security-audit"]  # fallback if CWE not in map
+
+
+def get_registry_packs(cwe_id: str) -> list[str]:
+    """Return deduplicated list of semgrep registry packs for a given CWE."""
+    for key, packs in CWE_TO_REGISTRY.items():
+        if cwe_id.startswith(key):
+            return list(dict.fromkeys(packs))   # deduplicate, preserve order
+    return DEFAULT_PACKS
+
+
+# ── Main scanner ──────────────────────────────────────────────────────────────
+
+def run_semgrep(config: str, code_path: str) -> list[dict]:
+    """Run semgrep with a registry config and return parsed findings."""
+    result = subprocess.run(
+        ["semgrep", "--config", config, "--json", "--quiet", code_path],
+        capture_output=True, text=True,
+    )
+    findings = []
+    if result.stdout:
+        try:
+            output = json.loads(result.stdout)
+            for r in output.get("results", []):
+                findings.append({
+                    "rule":    r["check_id"],
+                    "message": r["extra"]["message"],
+                    "line":    r["start"]["line"],
+                    "source":  config,
+                })
+        except json.JSONDecodeError:
+            pass
+    return findings
+
+
+def scan(json_path: str) -> list[dict]:
     print(f"\n[SCANNER] Reading: {json_path}")
     start = time.time()
-    with open(json_path, 'r') as f:
+
+    with open(json_path, "r") as f:
         data = json.load(f)
-    semgrep_rules = """
-rules:
-  - id: dangerous-strcpy
-    patterns:
-      - pattern: strcpy(...)
-    message: "Dangerous strcpy usage - CWE-120 Buffer Copy Without Checking Size"
-    languages: [c, cpp]
-    severity: ERROR
-  - id: dangerous-sprintf
-    patterns:
-      - pattern: sprintf(...)
-    message: "Dangerous sprintf usage - CWE-120 Buffer Overflow risk"
-    languages: [c, cpp]
-    severity: ERROR
-  - id: dangerous-strcat
-    patterns:
-      - pattern: strcat(...)
-    message: "Dangerous strcat usage - CWE-120 Buffer Overflow risk"
-    languages: [c, cpp]
-    severity: ERROR
-  - id: dangerous-gets
-    patterns:
-      - pattern: gets(...)
-    message: "Dangerous gets usage - CWE-120 Buffer Overflow"
-    languages: [c, cpp]
-    severity: ERROR
-  - id: use-after-free
-    patterns:
-      - pattern: |
-          free($X);
-          ...
-          $X
-    message: "Potential use-after-free - CWE-416"
-    languages: [c, cpp]
-    severity: ERROR
-"""
+
     results = []
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        rules_path = os.path.join(tmpdir, "rules.yaml")
-        with open(rules_path, 'w') as f:
-            f.write(semgrep_rules)
         for idx, entry in enumerate(data):
-            cwe_id = entry.get("cwe_id", "UNKNOWN")
-            cve_id = entry.get("cve_id", "UNKNOWN")
+            cwe_id   = entry.get("cwe_id", "UNKNOWN")
+            cve_id   = entry.get("cve_id", "UNKNOWN")
             entry_id = f"{cve_id}_{idx}"
+
+            # ── Extract code ─────────────────────────────────────────────────
             prompt = entry.get("prompt", "")
-            match = re.search(r'Vulnerable code:\n(.*?)(?:\[/INST\])', prompt, re.DOTALL)
+            match  = re.search(r"Vulnerable code:\n(.*?)(?:\[/INST\])", prompt, re.DOTALL)
             if not match:
                 print(f"  [SKIP] ID {entry_id} — could not extract code")
                 continue
             vuln_code = match.group(1).strip()
-            code_path = os.path.join(tmpdir, f"entry_{entry_id}.c")
-            with open(code_path, 'w') as f:
+
+            # ── Detect language & write file ──────────────────────────────────
+            detected_lang = detect_language(vuln_code, cwe_id)
+            ext           = LANG_EXTENSION.get(detected_lang, ".c")
+            code_path     = os.path.join(tmpdir, f"entry_{entry_id}{ext}")
+            with open(code_path, "w") as f:
                 f.write(vuln_code)
-            result = subprocess.run(
-                ["semgrep", "--config", rules_path, "--json", code_path],
-                capture_output=True, text=True
-            )
+
+            # ── Run CWE-mapped registry packs ────────────────────────────────
+            packs    = get_registry_packs(cwe_id)
             findings = []
-            if result.stdout:
-                try:
-                    semgrep_output = json.loads(result.stdout)
-                    for r in semgrep_output.get("results", []):
-                        findings.append({
-                            "rule": r["check_id"],
-                            "message": r["extra"]["message"],
-                            "line": r["start"]["line"]
-                        })
-                except json.JSONDecodeError:
-                    pass
-            if findings:
-                print(f"  [FOUND] ID {entry_id} | {cwe_id} | {cve_id} | {len(findings)} issue(s) detected by Semgrep")
-            else:
-                print(f"  [WARN]  ID {entry_id} | {cwe_id} | {cve_id} | No Semgrep rule matched (still passing through)")
+            seen_rules: set[str] = set()
+
+            for pack in packs:
+                for finding in run_semgrep(pack, code_path):
+                    if finding["rule"] not in seen_rules:
+                        seen_rules.add(finding["rule"])
+                        findings.append(finding)
+
+            # ── Fallback: auto (if nothing found yet) ─────────────────────────
+            if not findings:
+                for finding in run_semgrep("auto", code_path):
+                    if finding["rule"] not in seen_rules:
+                        seen_rules.add(finding["rule"])
+                        findings.append(finding)
+
+            # ── Log ───────────────────────────────────────────────────────────
+            tag = "[FOUND]" if findings else "[WARN] "
+            print(
+                f"  {tag} ID {entry_id} | {cwe_id} | {cve_id} | "
+                f"lang={detected_lang} | packs={packs} | {len(findings)} issue(s)"
+            )
+
             results.append({
-                "id": entry_id,
-                "cwe_id": cwe_id,
-                "cve_id": cve_id,
-                "vulnerable_code": vuln_code,
-                "patch": entry.get("completion", "").strip(),
-                "semgrep_findings": findings
+                "id":               entry_id,
+                "cwe_id":           cwe_id,
+                "cve_id":           cve_id,
+                "detected_lang":    detected_lang,
+                "registry_packs":   packs,
+                "vulnerable_code":  vuln_code,
+                "patch":            entry.get("completion", "").strip(),
+                "semgrep_findings": findings,
             })
+
     elapsed = time.time() - start
-    print(f"\n[SCANNER] Done. Processed {len(results)} entries in {elapsed:.3f} seconds.\n")
+    print(f"\n[SCANNER] Done. Processed {len(results)} entries in {elapsed:.3f}s.\n")
     return results
+
 
 if __name__ == "__main__":
     scan("test_input.json")
