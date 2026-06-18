@@ -145,4 +145,4 @@ def scan(json_path: str):
 
 
 if __name__ == "__main__":
-    scan("100_test.json")
+    scan("test_input.json")
