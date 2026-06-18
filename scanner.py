@@ -6,13 +6,15 @@ import time
 
 
 def run_semgrep(src_dir: str):
-    """Runs Semgrep across the entire temporary directory in one single pass."""
+    """Runs Semgrep using explicit open community query packs."""
     findings_by_file = {}
 
+    # Explicitly pull down the open-source C and security rule-packs
     result = subprocess.run(
         [
             "semgrep",
-            "--config", "auto",
+            "--config", "p/c",
+            "--config", "p/owasp-top-10",
             "--json",
             "--quiet",
             src_dir
@@ -80,7 +82,7 @@ def scan(json_path: str):
             
             valid_entries[filename] = (idx, entry)
 
-        print("[SCANNER] Running single batch optimization pass using Semgrep...")
+        print("[SCANNER] Running single batch optimization pass using Semgrep rules...")
         all_findings = run_semgrep(tmpdir)
 
         # Build downstream structures for the LLM pipeline
