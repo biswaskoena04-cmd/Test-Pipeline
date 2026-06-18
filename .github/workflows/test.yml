@@ -14,19 +14,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Download and path-configure CodeQL CLI
-      - name: Install CodeQL CLI
-        run: |
-          wget https://github.com/github/codeql-cli-binaries/releases/latest/download/codeql-linux64.zip
-          unzip -q codeql-linux64.zip
-          echo "$GITHUB_WORKSPACE/codeql" >> $GITHUB_PATH
-
-      # Prime the runner with C/C++ analysis rules out-of-the-box
-      - name: Pre-download CodeQL Query Pack
-        run: |
-          codeql pack download codeql/cpp-queries
-
-      # Modern tree-sitter packages require no separate compilation steps
       - name: Install dependencies
         run: pip install semgrep tree_sitter tree_sitter_c
 
