@@ -91,5 +91,5 @@ def slice_findings(findings):
 
 if __name__ == "__main__":
     # Runs the scanner pipeline targeting your 100_test payload matrix
-    findings = scan("100_test.json")
+    findings = scan("test_input.json")
     llm_ready_data = slice_findings(findings)
