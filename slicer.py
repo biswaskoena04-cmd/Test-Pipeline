@@ -6,7 +6,7 @@ from scanner import scan
 SEPARATOR = "-" * 60 
 
 def extract_functions(code):
-    """Use Tree-Sitter to extract functional nodes from raw code strings."""
+    """Isolates and extracts functional segments from blocks using Tree-Sitter."""
     C_LANGUAGE = Language(tsc.language())
     parser = Parser(C_LANGUAGE)
 
@@ -42,7 +42,7 @@ def get_function_name(node, code_bytes):
 
 
 def slice_findings(findings):
-    print(f"[SLICER] Processing {len(findings)} records using Tree-Sitter...\n")
+    print(f"[SLICER] Refining {len(findings)} entries via Tree-Sitter slicing...\n")
     start = time.time()
 
     sliced_llm_payload = []
@@ -60,31 +60,21 @@ def slice_findings(findings):
         print(f"CVE   : {finding['cve_id']}")
 
         if finding.get("semgrep_findings"):
-            print(f"SEMGREP RULES HIT:")
+            print(f"SEMGREP VULNERABILITY SIGNATURES DETECTED:")
             for sf in finding["semgrep_findings"]:
                 print(f"  - {sf['rule']} (line {sf['line']}): {sf['message']}")
 
         if vuln_functions:
-            print(f"\nVULN FUNCTIONS EXTRACTED BY TREE-SITTER ({len(vuln_functions)} found):")
+            print(f"\n[AST] EXTRACTED VULNERABLE FUNCTIONS ({len(vuln_functions)}):")
             for fn in vuln_functions:
-                print(f"\n  Function: {fn['name']} (lines {fn['start_line']}-{fn['end_line']})")
-                print(f"  Code:\n{fn['code']}")
+                print(f"  > {fn['name']} (lines {fn['start_line']}-{fn['end_line']})")
         else:
-            print(f"\VULN (raw — Tree-Sitter found no complete function definitions):")
-            print(vuln_code)
-
-        if patch_functions:
-            print(f"\nPATCH FUNCTIONS EXTRACTED BY TREE-SITTER ({len(patch_functions)} found):")
-            for fn in patch_functions:
-                print(f"\n  Function: {fn['name']} (lines {fn['start_line']}-{fn['end_line']})")
-                print(f"  Code:\n{fn['code']}")
-        else:
-            print(f"\nPATCH (raw — Tree-Sitter found no complete function definitions):")
-            print(patch_code)
+            print(f"\n[RAW VULN CONTEXT] (Tree-Sitter found fragment loop blocks):")
+            print(vuln_code[:150] + "...")
 
         print(SEPARATOR + "\n")
 
-        # Clean structured payload explicitly constructed for downstream LLM prompts
+        # Package data cleanly to keep LLM token limits optimized
         sliced_llm_payload.append({
             "id": finding["id"],
             "CWE": finding["cwe_id"],
@@ -95,10 +85,11 @@ def slice_findings(findings):
         })
 
     elapsed = time.time() - start
-    print(f"[SLICER] Done. Sliced {len(sliced_llm_payload)} items for processing context in {elapsed:.3f}s.\n")
+    print(f"[SLICER] Completed. Generated {len(sliced_llm_payload)} optimized context sets in {elapsed:.3f}s.\n")
     return sliced_llm_payload
 
 
 if __name__ == "__main__":
-    findings = scan("test_input.json")
+    # Runs the scanner pipeline targeting your 100_test payload matrix
+    findings = scan("100_test.json")
     llm_ready_data = slice_findings(findings)
