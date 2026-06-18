@@ -1,7 +1,7 @@
 import time
 from tree_sitter import Language, Parser
 import tree_sitter_c as tsc
-from scanner import scan
+from scanner import scan  # Ingests from the zero-network scanner
 
 SEPARATOR = "-" * 60 
 
@@ -42,12 +42,16 @@ def get_function_name(node, code_bytes):
 
 
 def slice_findings(findings):
-    print(f"[SLICER] Refining {len(findings)} entries via Tree-Sitter slicing...\n")
+    print(f"[SLICER] Refining entries via Tree-Sitter slicing...\n")
     start = time.time()
 
     sliced_llm_payload = []
 
     for finding in findings:
+        # CRITICAL FILTER STEP: Skip any entries that do not have findings
+        if not finding.get("semgrep_findings"):
+            continue
+
         vuln_code = finding["vulnerable_code"]
         patch_code = finding["fixed_code"] 
 
@@ -58,11 +62,9 @@ def slice_findings(findings):
         print(f"ID    : {finding['id']}")
         print(f"CWE   : {finding['cwe_id']}")
         print(f"CVE   : {finding['cve_id']}")
-
-        if finding.get("semgrep_findings"):
-            print(f"SEMGREP VULNERABILITY SIGNATURES DETECTED:")
-            for sf in finding["semgrep_findings"]:
-                print(f"  - {sf['rule']} (line {sf['line']}): {sf['message']}")
+        print(f"SEMGREP VULNERABILITY SIGNATURES DETECTED:")
+        for sf in finding["semgrep_findings"]:
+            print(f"  - {sf['rule']} (line {sf['line']}): {sf['message']}")
 
         if vuln_functions:
             print(f"\n[AST] EXTRACTED VULNERABLE FUNCTIONS ({len(vuln_functions)}):")
@@ -85,11 +87,10 @@ def slice_findings(findings):
         })
 
     elapsed = time.time() - start
-    print(f"[SLICER] Completed. Generated {len(sliced_llm_payload)} optimized context sets in {elapsed:.3f}s.\n")
+    print(f"[SLICER] Completed. Generated exactly {len(sliced_llm_payload)} optimized context sets for the LLM pipeline in {elapsed:.3f}s.\n")
     return sliced_llm_payload
 
 
 if __name__ == "__main__":
-    # Runs the scanner pipeline targeting your 100_test payload matrix
     findings = scan("test_input.json")
     llm_ready_data = slice_findings(findings)
