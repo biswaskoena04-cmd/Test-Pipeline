@@ -49,7 +49,7 @@ def slice_findings(findings):
 
     for finding in findings:
         vuln_code = finding["vulnerable_code"]
-        patch_code = finding["fixed_code"]  # Synchronized with 'fixed_code' key
+        patch_code = finding["fixed_code"] 
 
         vuln_functions = extract_functions(vuln_code)
         patch_functions = extract_functions(patch_code)
@@ -59,11 +59,10 @@ def slice_findings(findings):
         print(f"CWE   : {finding['cwe_id']}")
         print(f"CVE   : {finding['cve_id']}")
 
-        # Evaluates and prints CodeQL rule flags natively 
-        if finding["codeql_findings"]:
-            print(f"CODEQL RULES HIT:")
-            for cf in finding["codeql_findings"]:
-                print(f"  - {cf['rule']} (line {cf['line']}): {cf['message']}")
+        if finding.get("semgrep_findings"):
+            print(f"SEMGREP RULES HIT:")
+            for sf in finding["semgrep_findings"]:
+                print(f"  - {sf['rule']} (line {sf['line']}): {sf['message']}")
 
         if vuln_functions:
             print(f"\nVULN FUNCTIONS EXTRACTED BY TREE-SITTER ({len(vuln_functions)} found):")
@@ -71,7 +70,7 @@ def slice_findings(findings):
                 print(f"\n  Function: {fn['name']} (lines {fn['start_line']}-{fn['end_line']})")
                 print(f"  Code:\n{fn['code']}")
         else:
-            print(f"\nVULN (raw — Tree-Sitter found no complete function definitions):")
+            print(f"\VULN (raw — Tree-Sitter found no complete function definitions):")
             print(vuln_code)
 
         if patch_functions:
@@ -85,14 +84,14 @@ def slice_findings(findings):
 
         print(SEPARATOR + "\n")
 
-        # Clean JSON payload structural dictionary meant for the downstream LLM 
+        # Clean structured payload explicitly constructed for downstream LLM prompts
         sliced_llm_payload.append({
             "id": finding["id"],
             "CWE": finding["cwe_id"],
             "CVE": finding["cve_id"],
             "VULN_AST_FUNCTIONS": vuln_functions if vuln_functions else vuln_code,
             "PATCH_AST_FUNCTIONS": patch_functions if patch_functions else patch_code,
-            "codeql_findings": finding["codeql_findings"]
+            "semgrep_findings": finding["semgrep_findings"]
         })
 
     elapsed = time.time() - start
@@ -103,4 +102,3 @@ def slice_findings(findings):
 if __name__ == "__main__":
     findings = scan("test_input.json")
     llm_ready_data = slice_findings(findings)
-    # The 'llm_ready_data' can now be passed safely to your prompt tokenizer.
