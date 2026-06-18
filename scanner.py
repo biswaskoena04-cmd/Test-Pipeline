@@ -6,12 +6,12 @@ import time
 
 
 def run_codeql(src_dir: str):
-    """Creates a CodeQL database of the directory and analyzes it."""
+    """Creates a temporary CodeQL database of the isolated blocks and analyzes it."""
     db_path = os.path.join(src_dir, "codeql_db")
     results_sarif = os.path.join(src_dir, "results.sarif")
     findings_by_file = {}
 
-    # 1. Create a buildless CodeQL database
+    # 1. Create a buildless CodeQL database tracking C syntax structures
     subprocess.run(
         [
             "codeql", "database", "create", db_path,
@@ -25,7 +25,7 @@ def run_codeql(src_dir: str):
         check=True
     )
 
-    # 2. Run standard C/C++ security queries (downloads packs automatically)
+    # 2. Run standard C/C++ security queries
     subprocess.run(
         [
             "codeql", "database", "analyze", db_path,
@@ -38,12 +38,11 @@ def run_codeql(src_dir: str):
         check=True
     )
 
-    # 3. Parse the SARIF JSON output
+    # 3. Parse standard structural SARIF records for the LLM context mapping
     if os.path.exists(results_sarif):
         with open(results_sarif, "r", encoding="utf-8") as f:
             sarif_data = json.load(f)
 
-        # Loop through found runs/results
         for run in sarif_data.get("runs", []):
             for r in run.get("results", []):
                 rule_id = r.get("ruleId")
@@ -68,7 +67,7 @@ def run_codeql(src_dir: str):
 
 
 def scan(json_path: str):
-    print(f"\n[SCANNER] Reading: {json_path}")
+    print(f"\n[SCANNER] Reading dataset payload: {json_path}")
     start = time.time()
 
     with open(json_path, "r", encoding="utf-8") as f:
@@ -79,7 +78,7 @@ def scan(json_path: str):
     with tempfile.TemporaryDirectory() as tmpdir:
         valid_entries = {}
 
-        # Write out all individual files first to scan them concurrently
+        # Isolate code fragments into files to handle them in one batch run
         for idx, entry in enumerate(data):
             vuln_code = entry.get("vulnerable_code", "").strip()
 
@@ -93,35 +92,29 @@ def scan(json_path: str):
             with open(code_path, "w", encoding="utf-8") as f:
                 f.write(vuln_code)
             
-            valid_entries[filename] = (idx, vuln_code)
+            valid_entries[filename] = (idx, entry)
 
-        # Run CodeQL once across the entire temporary folder
-        print("[SCANNER] Initializing buildless CodeQL analysis pass...")
+        print("[SCANNER] Running single batch optimization pass using CodeQL...")
         all_findings = run_codeql(tmpdir)
 
-        # Map CodeQL structural findings back to our processing dataset
-        for filename, (idx, vuln_code) in valid_entries.items():
+        # Build clean downstream structures mapping data precisely to your schemas
+        for filename, (idx, original_entry) in valid_entries.items():
             findings = all_findings.get(filename, [])
             tag = "[FOUND]" if findings else "[WARN]"
 
-            print(
-                f"{tag} Entry {idx} | "
-                f"{len(findings)} issue(s) detected via CodeQL"
-            )
+            print(f"{tag} Entry {idx} | {len(findings)} issue(s) detected via CodeQL")
 
             results.append({
-                "entry_id": idx,
-                "vulnerable_code": vuln_code,
+                "id": original_entry.get("id", idx),
+                "cve_id": original_entry.get("cve_id", "N/A"),
+                "cwe_id": original_entry.get("cwe_id", "N/A"),
+                "vulnerable_code": original_entry.get("vulnerable_code", ""),
+                "fixed_code": original_entry.get("fixed_code", ""),
                 "codeql_findings": findings,
             })
 
     elapsed = time.time() - start
-    print(
-        f"\n[SCANNER] Done. "
-        f"Processed {len(results)} entries "
-        f"in {elapsed:.2f}s"
-    )
-
+    print(f"[SCANNER] Completed scanning execution in {elapsed:.2f}s")
     return results
 
 
