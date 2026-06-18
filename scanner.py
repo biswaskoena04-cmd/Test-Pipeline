@@ -4,50 +4,95 @@ import subprocess
 import tempfile
 import time
 
+# Embedded, localized C/C++ security rules to bypass network rule-download limits
+LOCAL_RULES_YAML = """
+rules:
+  - id: integer-overflow-alloc
+    languages: [c, cpp]
+    severity: WARNING
+    message: Potential integer overflow leading to buffer overflow during allocation.
+    pattern-either:
+      - pattern: malloc($LEN * $SIZE)
+      - pattern: calloc($NUM, $SIZE)
+      - pattern: realloc($PTR, $LEN * $SIZE)
 
-def run_semgrep(src_dir: str):
-    """Runs Semgrep against the folder using the comprehensive C security pack."""
+  - id: unsafe-string-copy
+    languages: [c, cpp]
+    severity: WARNING
+    message: Unsafe string copy function detected. Use strncpy or bounds-checked alternatives.
+    pattern-either:
+      - pattern: strcpy(...)
+      - pattern: strcat(...)
+      - pattern: sprintf($BUF, "...", ...)
+
+  - id: use-after-free
+    languages: [c, cpp]
+    severity: WARNING
+    message: Potential use-after-free pattern detected.
+    patterns:
+      - pattern: free($PTR);
+      - pattern-not: $PTR = NULL;
+      - pattern-inside: |
+          ...
+          free($PTR);
+          ...
+          $PTR->...
+
+  - id: generic-buffer-bounds
+    languages: [c, cpp]
+    severity: WARNING
+    message: Potentially bounded function missing size control validation.
+    pattern-either:
+      - pattern: memcpy(...)
+      - pattern: memmove(...)
+      - pattern: gets(...)
+"""
+
+def run_semgrep_offline(src_dir: str):
+    """Runs Semgrep locally using zero-network embedded rule validations."""
     findings_by_file = {}
 
-    # Force download and usage of explicit C vulnerability rules
-    result = subprocess.run(
-        [
-            "semgrep",
-            "--config", "p/c",
-            "--config", "p/security-audit",
-            "--json",
-            "--quiet",
-            src_dir
-        ],
-        capture_output=True,
-        text=True
-    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        f.write(LOCAL_RULES_YAML)
+        rule_file_path = f.name
 
-    if result.stdout:
-        try:
-            output = json.loads(result.stdout)
+    try:
+        result = subprocess.run(
+            [
+                "semgrep",
+                "--config", rule_file_path,
+                "--json",
+                "--quiet",
+                src_dir
+            ],
+            capture_output=True,
+            text=True
+        )
 
-            for r in output.get("results", []):
-                path = r.get("path", "")
-                filename = os.path.basename(path)
-                
-                rule_id = r.get("check_id")
-                message = r.get("extra", {}).get("message", "")
-                line = r.get("start", {}).get("line", 0)
+        if result.stdout:
+            try:
+                output = json.loads(result.stdout)
+                for r in output.get("results", []):
+                    path = r.get("path", "")
+                    filename = os.path.basename(path)
+                    
+                    rule_id = r.get("check_id")
+                    message = r.get("extra", {}).get("message", "")
+                    line = r.get("start", {}).get("line", 0)
 
-                if filename not in findings_by_file:
-                    findings_by_file[filename] = []
-                
-                # Subtract 1 from the line number if you want to normalize 
-                # the line numbers back to the original unwrapped code
-                findings_by_file[filename].append({
-                    "rule": rule_id,
-                    "message": message,
-                    "line": max(1, line - 1)  
-                })
-
-        except json.JSONDecodeError:
-            pass
+                    if filename not in findings_by_file:
+                        findings_by_file[filename] = []
+                    
+                    findings_by_file[filename].append({
+                        "rule": rule_id,
+                        "message": message,
+                        "line": line
+                    })
+            except json.JSONDecodeError:
+                pass
+    finally:
+        if os.path.exists(rule_file_path):
+            os.remove(rule_file_path)
 
     return findings_by_file
 
@@ -70,13 +115,11 @@ def scan(json_path: str):
 
         for idx, entry in enumerate(data):
             vuln_code = entry.get("vulnerable_code", "").strip()
-
             if not vuln_code:
                 continue
 
-            # CRITICAL FIX: If the block doesn't start with a function definition,
-            # wrap it in a dummy function so the static analyzer can parse its structures.
-            if "{" in vuln_code and not vuln_code.startswith("void") and not vuln_code.startswith("int"):
+            # Ensure snippets look structurally valid to parser mechanics
+            if "{" in vuln_code and not (vuln_code.startswith("void") or vuln_code.startswith("int") or vuln_code.startswith("static")):
                 wrapped_code = f"void dataset_harness_{idx}() {{\n{vuln_code}\n}}"
             else:
                 wrapped_code = vuln_code
@@ -89,15 +132,14 @@ def scan(json_path: str):
             
             valid_entries[filename] = (idx, entry)
 
-        print("[SCANNER] Running single batch pass across normalized snippets...")
-        all_findings = run_semgrep(tmpdir)
+        print("[SCANNER] Running deterministic evaluation over workspace elements...")
+        all_findings = run_semgrep_offline(tmpdir)
 
-        # Build downstream structures for the LLM pipeline
         for filename, (idx, original_entry) in valid_entries.items():
             findings = all_findings.get(filename, [])
             tag = "[FOUND]" if findings else "[WARN]"
 
-            print(f"{tag} Entry {idx} | {len(findings)} issue(s) detected via Semgrep")
+            print(f"{tag} Entry {idx} | {len(findings)} issue(s) confirmed via custom mapping rules")
 
             results.append({
                 "id": original_entry.get("id", idx if not isinstance(original_entry, dict) else original_entry.get("id", idx)),
@@ -108,8 +150,7 @@ def scan(json_path: str):
                 "semgrep_findings": findings,
             })
 
-    elapsed = time.time() - start
-    print(f"[SCANNER] Completed scanning execution in {elapsed:.2f}s")
+    print(f"[SCANNER] Completed execution loop in {time.time() - start:.2f}s")
     return results
 
 
