@@ -6,7 +6,7 @@ from scanner import scan
 SEPARATOR = "-" * 60 
 
 def extract_functions(code):
-    """Use Tree-Sitter to extract all function definitions from C code."""
+    """Use Tree-Sitter to extract functional nodes from raw code strings."""
     C_LANGUAGE = Language(tsc.language())
     parser = Parser(C_LANGUAGE)
 
@@ -33,7 +33,6 @@ def extract_functions(code):
 
 
 def get_function_name(node, code_bytes):
-    """Extract function name from a function_definition node."""
     for child in node.children:
         if child.type == "function_declarator":
             for subchild in child.children:
@@ -43,14 +42,14 @@ def get_function_name(node, code_bytes):
 
 
 def slice_findings(findings):
-    print(f"[SLICER] Processing {len(findings)} findings with Tree-Sitter...\n")
+    print(f"[SLICER] Processing {len(findings)} records using Tree-Sitter...\n")
     start = time.time()
 
-    sliced = []
+    sliced_llm_payload = []
 
     for finding in findings:
         vuln_code = finding["vulnerable_code"]
-        patch_code = finding["patch"]
+        patch_code = finding["fixed_code"]  # Synchronized with 'fixed_code' key
 
         vuln_functions = extract_functions(vuln_code)
         patch_functions = extract_functions(patch_code)
@@ -60,10 +59,11 @@ def slice_findings(findings):
         print(f"CWE   : {finding['cwe_id']}")
         print(f"CVE   : {finding['cve_id']}")
 
-        if finding["semgrep_findings"]:
-            print(f"SEMGREP RULES HIT:")
-            for sf in finding["semgrep_findings"]:
-                print(f"  - {sf['rule']} (line {sf['line']}): {sf['message']}")
+        # Evaluates and prints CodeQL rule flags natively 
+        if finding["codeql_findings"]:
+            print(f"CODEQL RULES HIT:")
+            for cf in finding["codeql_findings"]:
+                print(f"  - {cf['rule']} (line {cf['line']}): {cf['message']}")
 
         if vuln_functions:
             print(f"\nVULN FUNCTIONS EXTRACTED BY TREE-SITTER ({len(vuln_functions)} found):")
@@ -85,20 +85,22 @@ def slice_findings(findings):
 
         print(SEPARATOR + "\n")
 
-        sliced.append({
+        # Clean JSON payload structural dictionary meant for the downstream LLM 
+        sliced_llm_payload.append({
             "id": finding["id"],
             "CWE": finding["cwe_id"],
             "CVE": finding["cve_id"],
-            "VULN": vuln_functions if vuln_functions else vuln_code,
-            "PATCH": patch_functions if patch_functions else patch_code,
-            "semgrep_findings": finding["semgrep_findings"]
+            "VULN_AST_FUNCTIONS": vuln_functions if vuln_functions else vuln_code,
+            "PATCH_AST_FUNCTIONS": patch_functions if patch_functions else patch_code,
+            "codeql_findings": finding["codeql_findings"]
         })
 
     elapsed = time.time() - start
-    print(f"[SLICER] Done. Sliced {len(sliced)} entries in {elapsed:.3f} seconds.\n")
-    return sliced
+    print(f"[SLICER] Done. Sliced {len(sliced_llm_payload)} items for processing context in {elapsed:.3f}s.\n")
+    return sliced_llm_payload
 
 
 if __name__ == "__main__":
     findings = scan("test_input.json")
-    slice_findings(findings)
+    llm_ready_data = slice_findings(findings)
+    # The 'llm_ready_data' can now be passed safely to your prompt tokenizer.
