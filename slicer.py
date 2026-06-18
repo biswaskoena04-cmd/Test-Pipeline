@@ -1,7 +1,7 @@
 import time
 from tree_sitter import Language, Parser
 import tree_sitter_c as tsc
-from scanner import scan  # Targets your updated scanner logic
+from scanner import scan
 
 SEPARATOR = "-" * 60 
 
@@ -48,13 +48,12 @@ def slice_findings(findings):
     start = time.time()
 
     sliced_llm_payload = []
+    total_sliced_count = 0  # Track total sliced outputs
 
     for finding in findings:
-        # 1. CRITICAL FILTER STEP: Skip entries that do not have active findings
         if not finding.get("semgrep_findings"):
             continue
 
-        # 2. Key normalization fallback wrapper matching your JSON dataset schema maps
         vuln_code = finding.get("vulnerable_code", "").strip()
         patch_code = finding.get("fixed_code", "").strip()
 
@@ -87,10 +86,11 @@ def slice_findings(findings):
             "PATCH_AST_FUNCTIONS": patch_functions if patch_functions else patch_code,
             "semgrep_findings": finding["semgrep_findings"]
         })
+        total_sliced_count += 1  # Increment our slice counter
 
     elapsed = time.time() - start
-    print(f"[SLICER] Completed processing.")
-    print(f"SUCCESS: Generated exactly {len(sliced_llm_payload)} optimized context sets for the LLM pipeline in {elapsed:.3f}s.\n")
+    print(f"[SLICER] Completed processing inside {elapsed:.3f}s.")
+    print(f"SUMMARY: {total_sliced_count} findings sliced\n")  # Y findings sliced
     return sliced_llm_payload
 
 
