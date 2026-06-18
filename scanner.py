@@ -5,63 +5,45 @@ import tempfile
 import time
 
 
-def run_codeql(src_dir: str):
-    """Creates a temporary CodeQL database of the isolated blocks and analyzes it."""
-    db_path = os.path.join(src_dir, "codeql_db")
-    results_sarif = os.path.join(src_dir, "results.sarif")
+def run_semgrep(src_dir: str):
+    """Runs Semgrep across the entire temporary directory in one single pass."""
     findings_by_file = {}
 
-    # 1. Create a buildless CodeQL database tracking C syntax structures
-    subprocess.run(
+    result = subprocess.run(
         [
-            "codeql", "database", "create", db_path,
-            "--language=cpp",
-            "--source-root", src_dir,
-            "--build-mode=none",
-            "--overwrite"
+            "semgrep",
+            "--config", "auto",
+            "--json",
+            "--quiet",
+            src_dir
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True
+        capture_output=True,
+        text=True
     )
 
-    # 2. Run standard C/C++ security queries
-    subprocess.run(
-        [
-            "codeql", "database", "analyze", db_path,
-            "codeql/cpp-queries",
-            "--format=sarif-latest",
-            "--output", results_sarif
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=True
-    )
+    if result.stdout:
+        try:
+            output = json.loads(result.stdout)
 
-    # 3. Parse standard structural SARIF records for the LLM context mapping
-    if os.path.exists(results_sarif):
-        with open(results_sarif, "r", encoding="utf-8") as f:
-            sarif_data = json.load(f)
-
-        for run in sarif_data.get("runs", []):
-            for r in run.get("results", []):
-                rule_id = r.get("ruleId")
-                message = r.get("message", {}).get("text", "")
+            for r in output.get("results", []):
+                path = r.get("path", "")
+                filename = os.path.basename(path)
                 
-                for location in r.get("locations", []):
-                    physical_loc = location.get("physicalLocation", {})
-                    uri = physical_loc.get("artifactLocation", {}).get("uri", "")
-                    filename = os.path.basename(uri)
-                    line = physical_loc.get("region", {}).get("startLine", 0)
+                rule_id = r.get("check_id")
+                message = r.get("extra", {}).get("message", "")
+                line = r.get("start", {}).get("line", 0)
 
-                    if filename not in findings_by_file:
-                        findings_by_file[filename] = []
-                    
-                    findings_by_file[filename].append({
-                        "rule": rule_id,
-                        "message": message,
-                        "line": line
-                    })
+                if filename not in findings_by_file:
+                    findings_by_file[filename] = []
+                
+                findings_by_file[filename].append({
+                    "rule": rule_id,
+                    "message": message,
+                    "line": line
+                })
+
+        except json.JSONDecodeError:
+            pass
 
     return findings_by_file
 
@@ -69,6 +51,10 @@ def run_codeql(src_dir: str):
 def scan(json_path: str):
     print(f"\n[SCANNER] Reading dataset payload: {json_path}")
     start = time.time()
+
+    if not os.path.exists(json_path):
+        print(f"[ERROR] Input file {json_path} not found.")
+        return []
 
     with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -78,7 +64,7 @@ def scan(json_path: str):
     with tempfile.TemporaryDirectory() as tmpdir:
         valid_entries = {}
 
-        # Isolate code fragments into files to handle them in one batch run
+        # Isolate code fragments into temporary files
         for idx, entry in enumerate(data):
             vuln_code = entry.get("vulnerable_code", "").strip()
 
@@ -94,23 +80,23 @@ def scan(json_path: str):
             
             valid_entries[filename] = (idx, entry)
 
-        print("[SCANNER] Running single batch optimization pass using CodeQL...")
-        all_findings = run_codeql(tmpdir)
+        print("[SCANNER] Running single batch optimization pass using Semgrep...")
+        all_findings = run_semgrep(tmpdir)
 
-        # Build clean downstream structures mapping data precisely to your schemas
+        # Build downstream structures for the LLM pipeline
         for filename, (idx, original_entry) in valid_entries.items():
             findings = all_findings.get(filename, [])
             tag = "[FOUND]" if findings else "[WARN]"
 
-            print(f"{tag} Entry {idx} | {len(findings)} issue(s) detected via CodeQL")
+            print(f"{tag} Entry {idx} | {len(findings)} issue(s) detected via Semgrep")
 
             results.append({
-                "id": original_entry.get("id", idx),
+                "id": original_entry.get("id", idx if not isinstance(original_entry, dict) else original_entry.get("id", idx)),
                 "cve_id": original_entry.get("cve_id", "N/A"),
                 "cwe_id": original_entry.get("cwe_id", "N/A"),
                 "vulnerable_code": original_entry.get("vulnerable_code", ""),
                 "fixed_code": original_entry.get("fixed_code", ""),
-                "codeql_findings": findings,
+                "semgrep_findings": findings,
             })
 
     elapsed = time.time() - start
