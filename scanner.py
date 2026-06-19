@@ -4,6 +4,8 @@ import re
 import subprocess
 import tempfile
 import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # --- Tool 1: Semgrep ---
@@ -154,7 +156,7 @@ def _severity_rank(sev: str) -> int:
     return order.get(sev.lower(), 0)
 
 
-# --- Vuln code extraction (from your old code) ---
+# --- Vuln code extraction ---
 
 def extract_vuln_code(entry: dict) -> str:
     vuln_code = entry.get("vulnerable_code", entry.get("prompt", "")).strip()
@@ -169,15 +171,47 @@ def extract_vuln_code(entry: dict) -> str:
 # --- Main scan orchestration ---
 
 def generate_unified_report(file_path: str) -> list[dict]:
-    """Run all three scanners on one file, parse, and dedupe."""
-    all_findings = []
-    all_findings += parse_semgrep(run_semgrep(file_path))
-    all_findings += parse_cppcheck(run_cppcheck(file_path))
-    all_findings += parse_clang(run_clang(file_path))
-    return deduplicate(all_findings)
+    """Run all three scanners on one file, parse, and dedupe. Returns (findings, per_tool_raw_counts)."""
+    semgrep_raw = parse_semgrep(run_semgrep(file_path))
+    cppcheck_raw = parse_cppcheck(run_cppcheck(file_path))
+    clang_raw = parse_clang(run_clang(file_path))
+
+    all_findings = semgrep_raw + cppcheck_raw + clang_raw
+    per_tool_counts = {
+        "semgrep": len(semgrep_raw),
+        "cppcheck": len(cppcheck_raw),
+        "clang-tidy": len(clang_raw),
+    }
+    return deduplicate(all_findings), per_tool_counts
 
 
-def scan(json_path: str) -> list[dict]:
+def _scan_one_entry(idx, entry):
+    vuln_code = extract_vuln_code(entry)
+    if not vuln_code:
+        return None
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".c", delete=False, encoding="utf-8") as tmp:
+        tmp.write(vuln_code)
+        tmp_path = tmp.name
+
+    try:
+        findings, per_tool_counts = generate_unified_report(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+    tag = "[FOUND]" if findings else "[CLEAN]"
+    print(f"{tag} Entry {idx} | {len(findings)} finding(s) "
+          f"(semgrep:{per_tool_counts['semgrep']} cppcheck:{per_tool_counts['cppcheck']} clang-tidy:{per_tool_counts['clang-tidy']})")
+
+    return {
+        "id": entry.get("id", idx),
+        "vulnerable_code": vuln_code,
+        "findings": findings,
+        "_per_tool_counts": per_tool_counts,  # stripped before final output, used for summary only
+    }
+
+
+def scan(json_path: str, max_workers: int = 8) -> list[dict]:
     print(f"\n[SCANNER] Ingesting dataset: {json_path}")
     start = time.time()
 
@@ -189,34 +223,36 @@ def scan(json_path: str) -> list[dict]:
         data = json.load(f)
 
     results = []
-    total_findings = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_scan_one_entry, idx, entry): idx for idx, entry in enumerate(data)}
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                results.append(result)
 
-    for idx, entry in enumerate(data):
-        vuln_code = extract_vuln_code(entry)
-        if not vuln_code:
-            continue
+    # restore original order — as_completed finishes out of order
+    results.sort(key=lambda r: r["id"] if isinstance(r["id"], int) else 0)
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".c", delete=False, encoding="utf-8") as tmp:
-            tmp.write(vuln_code)
-            tmp_path = tmp.name
+    # --- per-tool contribution summary ---
+    tool_totals = Counter()
+    for r in results:
+        for tool, count in r["_per_tool_counts"].items():
+            tool_totals[tool] += count
 
-        try:
-            findings = generate_unified_report(tmp_path)
-        finally:
-            os.unlink(tmp_path)
-
-        total_findings += len(findings)
-        tag = "[FOUND]" if findings else "[CLEAN]"
-        print(f"{tag} Entry {idx} | {len(findings)} finding(s)")
-
-        results.append({
-            "id": entry.get("id", idx),
-            "vulnerable_code": vuln_code,
-            "findings": findings,
-        })
-
+    total_findings = sum(len(r["findings"]) for r in results)
     elapsed = time.time() - start
-    print(f"\n[SCANNER] Done in {elapsed:.2f}s | {total_findings} total findings across {len(results)} entries")
+
+    print(f"\n[SCANNER] Done in {elapsed:.2f}s | {total_findings} merged findings across {len(results)} entries")
+    print(f"[SCANNER] Raw findings by tool (pre-dedup): "
+          f"semgrep={tool_totals['semgrep']}, cppcheck={tool_totals['cppcheck']}, clang-tidy={tool_totals['clang-tidy']}")
+    for tool in ("semgrep", "cppcheck", "clang-tidy"):
+        if tool_totals[tool] == 0:
+            print(f"[WARNING] {tool} contributed 0 findings across the entire run — check it's installed and on PATH")
+
+    # strip internal bookkeeping field before returning
+    for r in results:
+        del r["_per_tool_counts"]
+
     return results
 
 
